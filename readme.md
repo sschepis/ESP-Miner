@@ -174,6 +174,247 @@ If your Wi-Fi router has both of these options you might have to disable them bo
 If your still having problems here, check other settings within the Wi-Fi router and the bitaxe device, this includes the URL for
 the Stratum Host and Stratum Port.
 
+## ASIC Interface Points and Starting Nonce Control
+
+This section documents the ASIC interface points in the ESP-Miner firmware and discusses how to programmatically provide a starting nonce for the ASIC.
+
+### Overview
+
+ESP-Miner supports four ASIC models, each with its own driver implementation:
+- **BM1397** - Located in `components/asic/bm1397.c`
+- **BM1366** - Located in `components/asic/bm1366.c`
+- **BM1368** - Located in `components/asic/bm1368.c`
+- **BM1370** - Located in `components/asic/bm1370.c`
+
+All ASIC models share a common interface abstraction layer defined in `components/asic/asic.c`.
+
+### Key Interface Points
+
+#### 1. **Job Packet Structure**
+
+Each ASIC model has its own job packet structure that includes a `starting_nonce` field:
+
+**BM1397** (`components/asic/include/bm1397.h`):
+```c
+typedef struct __attribute__((__packed__))
+{
+    uint8_t job_id;
+    uint8_t num_midstates;
+    uint8_t starting_nonce[4];    // Starting nonce for the ASIC
+    uint8_t nbits[4];
+    uint8_t ntime[4];
+    uint8_t merkle4[4];
+    uint8_t midstate[32];
+    uint8_t midstate1[32];
+    uint8_t midstate2[32];
+    uint8_t midstate3[32];
+} job_packet;
+```
+
+**BM1366, BM1368, BM1370** (similar structure):
+```c
+typedef struct __attribute__((__packed__))
+{
+    uint8_t job_id;
+    uint8_t num_midstates;
+    uint8_t starting_nonce[4];    // Starting nonce for the ASIC
+    uint8_t nbits[4];
+    uint8_t ntime[4];
+    uint8_t merkle_root[32];
+    uint8_t prev_block_hash[32];
+    uint8_t version[4];
+} BM1366_job;  // Similar for BM1368_job and BM1370_job
+```
+
+#### 2. **Job Construction Flow**
+
+The starting nonce flows through the following components:
+
+1. **Mining Job Structure** (`components/stratum/include/mining.h`):
+   ```c
+   typedef struct {
+       uint32_t version;
+       uint32_t version_mask;
+       uint8_t prev_block_hash[32];
+       uint8_t prev_block_hash_be[32];
+       uint8_t merkle_root[32];
+       uint8_t merkle_root_be[32];
+       uint32_t ntime;
+       uint32_t target;
+       uint32_t starting_nonce;     // Starting nonce value
+       // ... other fields
+   } bm_job;
+   ```
+
+2. **Job Construction** (`components/stratum/mining.c:62`):
+   ```c
+   bm_job construct_bm_job(mining_notify *params, const char *merkle_root, 
+                           const uint32_t version_mask, const uint32_t difficulty)
+   {
+       bm_job new_job;
+       // ... initialization code
+       new_job.starting_nonce = 0;  // Currently hardcoded to 0
+       // ... rest of job construction
+   }
+   ```
+
+3. **Job Generation** (`main/tasks/create_jobs_task.c`):
+   - The `generate_work()` function creates jobs by calling `construct_bm_job()`
+   - Jobs are enqueued to `GLOBAL_STATE->ASIC_jobs_queue`
+
+4. **Job Transmission** (e.g., `components/asic/bm1366.c:266`):
+   ```c
+   void BM1366_send_work(void * pvParameters, bm_job * next_bm_job)
+   {
+       BM1366_job job;
+       // ... initialization
+       memcpy(&job.starting_nonce, &next_bm_job->starting_nonce, 4);
+       // ... rest of job packet construction
+       _send_BM1366((TYPE_JOB | GROUP_SINGLE | CMD_WRITE), (uint8_t *)&job, 
+                    sizeof(BM1366_job), BM1366_DEBUG_WORK);
+   }
+   ```
+
+#### 3. **Serial Communication**
+
+All ASIC communication occurs via UART (serial) interface:
+- **Interface**: `components/asic/serial.c`
+- **Functions**: 
+  - `SERIAL_init()` - Initialize UART1 (pins TX:17, RX:18)
+  - `SERIAL_send()` - Send data to ASIC
+  - `SERIAL_rx()` - Receive data from ASIC
+  - `SERIAL_set_baud()` - Configure baud rate
+
+The job packets are sent to the ASIC through the serial interface after being wrapped with protocol headers (preamble, length, CRC).
+
+#### 4. **ASIC Task Flow**
+
+The main ASIC task (`main/tasks/asic_task.c`) coordinates work:
+1. Dequeues jobs from `ASIC_jobs_queue`
+2. Calls `ASIC_send_work()` to transmit job to ASIC
+3. Calls `ASIC_process_work()` to receive results
+
+### Current Starting Nonce Implementation
+
+**Current Behavior**: The starting nonce is **hardcoded to 0** in `construct_bm_job()` function (`components/stratum/mining.c:62`).
+
+```c
+new_job.starting_nonce = 0;
+```
+
+This means every job sent to the ASIC starts searching from nonce value 0.
+
+### How to Programmatically Set Starting Nonce
+
+To programmatically provide a starting nonce for the ASIC, you have several options:
+
+#### Option 1: Modify Job Construction (Recommended)
+
+Modify the `construct_bm_job()` function in `components/stratum/mining.c`:
+
+```c
+bm_job construct_bm_job(mining_notify *params, const char *merkle_root, 
+                        const uint32_t version_mask, const uint32_t difficulty)
+{
+    bm_job new_job;
+    // ... existing code ...
+    
+    // Instead of hardcoded 0, calculate or provide starting nonce
+    new_job.starting_nonce = calculate_starting_nonce();  // Custom function
+    
+    // ... rest of function ...
+}
+```
+
+#### Option 2: Add API Endpoint
+
+Add a new API endpoint to set starting nonce programmatically:
+
+1. Add to `main/http_server/http_server.c`:
+   ```c
+   POST /api/system/starting_nonce
+   Body: {"starting_nonce": 12345678}
+   ```
+
+2. Store the value in `GlobalState` structure
+3. Use it in `construct_bm_job()`
+
+#### Option 3: Extend BAP Protocol
+
+Add a new parameter to the BAP protocol (`main/bap/`) for setting starting nonce:
+
+```
+Host:   $BAP,SET,starting_nonce,12345678*XX\r\n
+Device: $BAP,ACK,starting_nonce,12345678*YY\r\n
+```
+
+This would allow external devices connected via UART to control the starting nonce.
+
+#### Option 4: Use Extranonce2 for Work Segmentation
+
+The existing implementation already uses `extranonce_2` to generate different work units. This is incremented for each generated job (`main/tasks/create_jobs_task.c:57`), effectively distributing the nonce space across multiple work units without directly modifying the starting nonce.
+
+### Interface Summary
+
+| Interface Point | Location | Purpose |
+|----------------|----------|---------|
+| `ASIC_init()` | `components/asic/asic.c` | Initialize ASIC with frequency and difficulty |
+| `ASIC_send_work()` | `components/asic/asic.c` | Send job packet to ASIC |
+| `ASIC_process_work()` | `components/asic/asic.c` | Receive and process ASIC results |
+| `ASIC_set_frequency()` | `components/asic/asic.c` | Set ASIC operating frequency |
+| `ASIC_set_version_mask()` | `components/asic/asic.c` | Configure version rolling mask |
+| `ASIC_read_registers()` | `components/asic/asic.c` | Read ASIC internal registers |
+| `construct_bm_job()` | `components/stratum/mining.c` | Create job with starting_nonce |
+| `SERIAL_send()` | `components/asic/serial.c` | Low-level serial transmission |
+| `SERIAL_rx()` | `components/asic/serial.c` | Low-level serial reception |
+
+### Register Access
+
+Some ASICs support register access for configuration:
+- BM1366: Register read/write via `_send_BM1366()` with `TYPE_CMD` header
+- BM1370: Additional `BM1370_read_registers()` function
+- Registers control frequency, difficulty masks, and chip addresses
+
+### Recommendations
+
+For implementing programmatic starting nonce control:
+
+1. **Start with Option 1** (Modify `construct_bm_job()`): This is the cleanest approach and affects all ASIC models uniformly.
+
+2. **Add configuration storage**: Store the starting nonce strategy (fixed, random, incremental) in NVS config.
+
+3. **Consider nonce space partitioning**: If running multiple devices, partition the 32-bit nonce space (0 to 4,294,967,296) across devices to avoid duplicate work.
+
+4. **Test thoroughly**: Different starting nonces may affect ASIC performance and result reporting.
+
+5. **Document in API**: If exposing via HTTP API, document the endpoint in `main/http_server/openapi.yaml`.
+
+### Example Implementation
+
+Here's a simple example of adding starting nonce control:
+
+```c
+// In components/stratum/mining.c
+static uint32_t custom_starting_nonce = 0;
+
+void set_starting_nonce(uint32_t nonce) {
+    custom_starting_nonce = nonce;
+}
+
+bm_job construct_bm_job(mining_notify *params, const char *merkle_root,
+                        const uint32_t version_mask, const uint32_t difficulty)
+{
+    bm_job new_job;
+    // ... existing initialization ...
+    
+    new_job.starting_nonce = custom_starting_nonce;
+    
+    // ... rest of function ...
+}
+```
+
+This allows external code to call `set_starting_nonce()` before job construction to control the starting nonce value sent to the ASIC.
+
 ## Attributions
 
 The display font is Portfolio 6x8 from https://int10h.org/oldschool-pc-fonts/ by VileR.
