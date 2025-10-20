@@ -53,6 +53,7 @@ INCLUDE_DIRS
     "../components/connect/include"
     "../components/dns_server/include"
     "../components/stratum/include"
+    "../components/nonce_generator/include"
     "thermal"
     "power"
 
