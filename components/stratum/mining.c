@@ -4,6 +4,7 @@
 #include "mining.h"
 #include "utils.h"
 #include "mbedtls/sha256.h"
+#include "nonce_generator.h"
 
 void free_bm_job(bm_job *job)
 {
@@ -59,7 +60,7 @@ bm_job construct_bm_job(mining_notify *params, const char *merkle_root, const ui
     new_job.version = params->version;
     new_job.target = params->target;
     new_job.ntime = params->ntime;
-    new_job.starting_nonce = 0;
+    new_job.starting_nonce = nonce_generator_get_starting_nonce(difficulty, 0);
     new_job.pool_diff = difficulty;
 
     hex2bin(merkle_root, new_job.merkle_root, 32);

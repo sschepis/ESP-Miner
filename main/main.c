@@ -21,6 +21,7 @@
 #include "device_config.h"
 #include "connect.h"
 #include "asic_reset.h"
+#include "nonce_generator.h"
 
 static GlobalState GLOBAL_STATE;
 
@@ -107,6 +108,12 @@ void app_main(void)
     SERIAL_clear_buffer();
 
     GLOBAL_STATE.ASIC_initalized = true;
+
+    // Initialize nonce generator
+    // Default to SEQUENTIAL (backward compatible), or use PRIME_SKEW for experiment
+    nonce_gen_strategy_t strategy = NONCE_GEN_SEQUENTIAL;
+    nonce_generator_init(strategy);
+    ESP_LOGI(TAG, "Nonce generator initialized with strategy %d", strategy);
 
     if (xTaskCreate(stratum_task, "stratum admin", 8192, (void *) &GLOBAL_STATE, 5, NULL) != pdPASS) {
         ESP_LOGE(TAG, "Error creating stratum admin task");

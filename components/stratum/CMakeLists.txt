@@ -12,4 +12,5 @@ REQUIRES
     "mbedtls"
     "app_update"
     "esp_timer"
+    "nonce_generator"
 )
